@@ -108,11 +108,11 @@ nav button svg{width:22px;height:22px}
 // ==================== 状态管理 ====================
 const DB_KEY = 'novel_workshop_v2';
 let state = {
-  bookshelf: {},       // { name: { settings:{}, messages:[], chapters:[], round:0, updatedAt } }
-  activeStory: null,   // 当前活跃故事名
+  bookshelf: {},
+  activeStory: null,
   currentTab: 'bookshelf',
   isStreaming: false,
-  apiKey: 'sk-be9f5216b98845a0b895bedf97ac7b04',
+  apiKey: '',        // 用户自行在 DeepSeek 后台获取，仅存储在浏览器本地
   model: 'deepseek-v4-pro',
   maxTokens: 8192,
   baseUrl: 'https://api.deepseek.com/v1/chat/completions'
@@ -141,7 +141,7 @@ function loadState() {
   const raw = localStorage.getItem(DB_KEY);
   if (raw) { try { state = JSON.parse(raw); } catch(e) {} }
   if (!state.bookshelf) state.bookshelf = {};
-  if (!state.apiKey) state.apiKey = 'sk-be9f5216b98845a0b895bedf97ac7b04';
+  if (!state.apiKey) state.apiKey = '';
 }
 
 // ==================== Toast ====================
@@ -366,6 +366,13 @@ function escapeHtml(str) {
 function sendMessage() {
   if (state.isStreaming) return;
   
+  // 检查 API Key
+  if (!state.apiKey) {
+    showSettings();
+    toast('请先设置 DeepSeek API Key（在 DeepSeek 后台获取）');
+    return;
+  }
+  
   const input = document.getElementById('userInput');
   const text = input.value.trim();
   if (!text) return;
@@ -523,8 +530,8 @@ function showSettings() {
     </div>`}
     <hr style="border-color:var(--border);margin:16px 0">
     <h3>🔑 API 配置</h3>
-    <label>API Key</label>
-    <input id="apiKeyInput" type="password" value="${state.apiKey}">
+    <label>API Key <span style="color:var(--accent);font-size:11px">（<a href="https://platform.deepseek.com/api_keys" target="_blank" style="color:var(--accent)">在 DeepSeek 后台获取 →</a>）</span></label>
+    <input id="apiKeyInput" type="password" value="${state.apiKey}" placeholder="sk-...">${!state.apiKey ? '<p style="font-size:11px;color:var(--warn);margin-top:4px">⚠️ 请先去 DeepSeek 平台创建 API Key</p>' : ''}
     <label>模型</label>
     <input id="modelInput" value="${state.model}">
     <label>最大 Token 数</label>
@@ -600,6 +607,14 @@ document.addEventListener('DOMContentLoaded', () => {
     switchTab('chat');
   } else {
     switchTab('bookshelf');
+  }
+
+  // 首次使用：没有 API Key 则弹窗提示设置
+  if (!state.apiKey) {
+    setTimeout(() => {
+      showSettings();
+      toast('🔑 首次使用，请设置 DeepSeek API Key');
+    }, 500);
   }
 });
 
