@@ -339,13 +339,7 @@ body {
     <button onclick="showSettings()">⚙️</button>
   </div>
 
-  <div class="messages" id="messages">
-    <div class="empty-state" id="emptyState">
-      <div class="icon">📖</div>
-      <h3>AI 小说工坊</h3>
-      <p>在左侧书架创建或选择一个故事<br>然后开始你的创作之旅</p>
-    </div>
-  </div>
+  <div class="messages" id="messages"></div>
 
   <div class="input-bar">
     <textarea id="userInput" placeholder="输入你的剧情指令..." rows="1" disabled></textarea>
@@ -526,15 +520,14 @@ function buildPrompt(settings) {
 function renderMessages() {
   const s = story();
   const el = $('messages');
-  const empty = $('emptyState');
 
+  if (!s || (s.messages.length === 1 && s.messages[0].role === 'system')) {
+    // 只有系统消息时也显示欢迎
+  }
   if (!s) {
-    el.innerHTML = '';
-    el.appendChild(empty);
-    empty.classList.remove('hidden');
+    el.innerHTML = '<div class="empty-state" id="emptyState"><div class="icon">📖</div><h3>AI 小说工坊</h3><p>在左侧书架创建或选择一个故事<br>然后开始你的创作之旅</p></div>';
     return;
   }
-  empty.classList.add('hidden');
 
   let html = '';
   let chapIdx = 0;
@@ -633,6 +626,7 @@ function sendMessage() {
 
 async function streamAI(s) {
   abortCtrl = new AbortController();
+  let full = '';
 
   const body = JSON.stringify({
     model: state.model,
@@ -654,36 +648,44 @@ async function streamAI(s) {
     });
 
     if (!resp.ok) {
-      const errText = await resp.text();
-      let msg = 'HTTP ' + resp.status;
+      let msg;
+      const errText = await resp.text().catch(() => '');
       if (resp.status === 401) msg = 'API Key 无效，请检查设置';
       else if (resp.status === 402) msg = '余额不足，请充值';
       else if (resp.status === 429) msg = '请求太频繁，稍后再试';
-      else msg += ': ' + errText.substring(0, 150);
+      else msg = 'HTTP ' + resp.status + (errText ? ': ' + errText.substring(0, 150) : '');
       throw new Error(msg);
     }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
-    let full = '', buf = '';
+    let buf = '';
 
+    // 添加空的 assistant 消息用于流式填充
     s.messages.push({ role: 'assistant', content: '' });
     const mi = s.messages.length - 1;
     renderMessages();
 
-    while (true) {
+    let streamEnded = false;
+
+    while (!streamEnded) {
       const { done, value } = await reader.read();
       if (done) break;
 
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
+      // 保留最后一个不完整行
       buf = lines.pop() || '';
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        if (!trimmed) continue;
+        if (!trimmed.startsWith('data:')) continue;
         const data = trimmed.substring(5).trim();
-        if (data === '[DONE]') { buf = ''; break; }
+        if (data === '[DONE]') {
+          streamEnded = true;
+          break;
+        }
         try {
           const chunk = JSON.parse(data);
           const delta = chunk?.choices?.[0]?.delta?.content;
@@ -692,28 +694,37 @@ async function streamAI(s) {
             s.messages[mi].content = full;
             updateStreamingBlock(full, s);
           }
-        } catch(e) {}
+        } catch(e) { /* 跳过解析失败的行 */ }
       }
     }
 
-    // Extract chapter title
+    // 流结束后：确保 content 非空且正确
+    if (!full) {
+      s.messages.pop(); // 移除空消息
+      throw new Error('AI 返回了空内容，请重试');
+    }
+
+    s.messages[mi].content = full;
     const chap = extractChapter(full);
     if (!s.chapters) s.chapters = [];
     s.chapters.push(chap);
-
     save();
     finishStream(s);
 
   } catch (err) {
+    console.error('Stream error:', err);
     if (err.name === 'AbortError') {
-      // User cancelled - keep partial content
+      // 用户取消，保留已有内容
+      if (full) { s.messages[s.messages.length - 1].content = full; }
       save();
     } else {
       toast(err.message || '请求失败，请检查网络和 API Key', 'error');
-      // Remove empty assistant message
-      const last = s.messages[s.messages.length - 1];
-      if (last && last.role === 'assistant' && !last.content) {
-        s.messages.pop();
+      // 移除空的 assistant 消息
+      if (s.messages.length > 0) {
+        const last = s.messages[s.messages.length - 1];
+        if (last && last.role === 'assistant' && !last.content) {
+          s.messages.pop();
+        }
       }
       s.round = Math.max(0, s.round - 1);
       save();
@@ -797,30 +808,41 @@ function closeSettings() {
 }
 
 function saveAllSettings() {
-  // API settings
-  state.apiKey = $('apiKeyInput').value.trim();
-  state.model = $('modelInput').value.trim() || 'deepseek-v4-pro';
-  state.maxTokens = parseInt($('maxTokensInput').value) || 8192;
+  try {
+    // API settings
+    const apiEl = $('apiKeyInput');
+    const modelEl = $('modelInput');
+    const tokensEl = $('maxTokensInput');
+    if (apiEl) state.apiKey = apiEl.value.trim();
+    if (modelEl) state.model = modelEl.value.trim() || 'deepseek-v4-pro';
+    if (tokensEl) state.maxTokens = parseInt(tokensEl.value) || 8192;
 
-  // Story settings
-  const s = story();
-  if (s) {
-    s.settings = {
-      worldSetting: $('setWorld')?.value.trim() || '',
-      heroSetting: $('setHero')?.value.trim() || '',
-      charSetting: $('setChar')?.value.trim() || '',
-      sceneSetting: $('setScene')?.value.trim() || ''
-    };
-    // Rebuild system message
-    if (s.messages.length > 0 && s.messages[0].role === 'system') {
-      s.messages[0].content = buildPrompt(s.settings);
+    // Story settings
+    const s = story();
+    if (s) {
+      const worldEl = $('setWorld');
+      const heroEl = $('setHero');
+      const charEl = $('setChar');
+      const sceneEl = $('setScene');
+      s.settings = {
+        worldSetting: worldEl ? worldEl.value.trim() : '',
+        heroSetting: heroEl ? heroEl.value.trim() : '',
+        charSetting: charEl ? charEl.value.trim() : '',
+        sceneSetting: sceneEl ? sceneEl.value.trim() : ''
+      };
+      if (s.messages.length > 0 && s.messages[0].role === 'system') {
+        s.messages[0].content = buildPrompt(s.settings);
+      }
     }
-  }
 
-  save();
-  closeSettings();
-  renderAll();
-  toast('设置已保存');
+    save();
+    closeSettings();
+    renderAll();
+    toast('设置已保存');
+  } catch(e) {
+    toast('保存失败: ' + e.message, 'error');
+    console.error(e);
+  }
 }
 
 // ============================================
